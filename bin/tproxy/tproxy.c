@@ -864,6 +864,46 @@ fail:
 	return (NULL);
 }
 
+static void
+sysctl_opts_configure(const char *config_file)
+{
+	FILE *file = NULL;
+	char *line = NULL;
+	size_t len = 0;
+	ssize_t read;
+
+	int64_t oldp = 0, newp = 0;
+	size_t rval = 0, oldplen = sizeof(oldp);
+	char mib_name[64]; // @TODO: correct buffer sizing
+	int error;
+
+	printf("\nreading sysctl config: %s\n", config_file);
+
+	file = fopen(config_file, "r");
+	if (!file) {
+		perror("WARNING: failed to open configuration file");
+		goto fail;
+	}
+
+	while ((read = getline(&line, &len, file)) != -1) {
+		if (sscanf(line, "%31[^=]=%lld", mib_name, &newp) == 2) {
+			error = uinet_sysctlbyname(uinet_instance_default(), mib_name, NULL, &oldplen, NULL, 0, &rval, 0);
+			printf("%s=%lld oldplen=%d error=%d\n", mib_name, newp, oldplen, error);
+			
+			if (error = uinet_sysctlbyname(uinet_instance_default(), mib_name, (char *)&oldp, &oldplen, (char *)&newp, sizeof(newp), &rval, 0)) {
+				printf("uinet_sysctlbyname failure: %d\n", error);
+			} else {
+				printf("sysctl okay %s=%d (%d)\n", mib_name, newp, oldp);
+			}
+		}
+	}
+
+	printf("sysctl config complete...\n\n");
+
+fail:
+	if (file) fclose(file);
+	if (line) free(line);
+}
 
 static void
 usage(const char *progname)
@@ -874,6 +914,7 @@ usage(const char *progname)
 	printf("    -i ifname            specify network interface\n");
 	printf("    -l inaddr            listen address\n");
 	printf("    -p port              listen port [0, 65535]\n");
+	printf("    -c config            configuration file\n");
 	printf("    -v                   be verbose\n");
 }
 
@@ -887,12 +928,13 @@ int main (int argc, char **argv)
 	int num_ifs = 0;
 	char *ifnames[MAX_IFS];
 	char *listen_addr = NULL;
+	char *config_file = NULL;
 	int listen_port = -1;
 	int verbose = 0;
 	int i;
 	int error;
 
-	while ((ch = getopt(argc, argv, "hi:l:p:v")) != -1) {
+	while ((ch = getopt(argc, argv, "hi:l:p:c:v")) != -1) {
 		switch (ch) {
 		case 'h':
 			usage(progname);
@@ -908,6 +950,9 @@ int main (int argc, char **argv)
 			break;
 		case 'p':
 			listen_port = strtoul(optarg, NULL, 10);
+			break;
+		case 'c':
+			config_file = optarg;
 			break;
 		case 'v':
 			verbose++;
@@ -936,12 +981,16 @@ int main (int argc, char **argv)
 		printf("Specify a listen port [0, 65535]\n");
 		return (1);
 	}
-	
+
 	uinet_init(1, 128*1024, NULL);
 	uinet_install_sighandlers();
 
+	if (config_file) {
+		sysctl_opts_configure(config_file);
+	}
+
 	for (i = 0; i < num_ifs; i++) {
-		error = uinet_ifcreate(uinet_instance_default(), UINET_IFTYPE_NETMAP, ifnames[i], ifnames[i], i + 1, 0, NULL);
+		error = uinet_ifcreate(uinet_instance_default(), UINET_IFTYPE_PCAP, ifnames[i], ifnames[i], i + 1, 0, NULL);
 		if (0 != error) {
 			printf("Failed to create interface %s (%d)\n", ifnames[i], error);
 		} else {
