@@ -869,12 +869,11 @@ sysctl_opts_configure(const char *config_file)
 {
 	FILE *file = NULL;
 	char *line = NULL;
-	size_t len = 0;
 	ssize_t read;
 
-	int64_t oldp = 0, newp = 0;
-	size_t rval = 0, oldplen = sizeof(oldp);
-	char mib_name[64]; // @TODO: correct buffer sizing
+	char mib_name[64], newp_chr[64]; // @TODO: correct buffer sizing
+	size_t lnlen = 0, oldplen, newplen, rval;
+	int64_t oldp, newp;
 	int error;
 
 	printf("\nreading sysctl config: %s\n", config_file);
@@ -885,15 +884,26 @@ sysctl_opts_configure(const char *config_file)
 		goto fail;
 	}
 
-	while ((read = getline(&line, &len, file)) != -1) {
-		if (sscanf(line, "%31[^=]=%lld", mib_name, &newp) == 2) {
-			error = uinet_sysctlbyname(uinet_instance_default(), mib_name, NULL, &oldplen, NULL, 0, &rval, 0);
-			printf("%s=%lld oldplen=%d error=%d\n", mib_name, newp, oldplen, error);
-			
-			if (error = uinet_sysctlbyname(uinet_instance_default(), mib_name, (char *)&oldp, &oldplen, (char *)&newp, sizeof(newp), &rval, 0)) {
-				printf("uinet_sysctlbyname failure: %d\n", error);
+	while ((read = getline(&line, &lnlen, file)) != -1) {
+		if (sscanf(line, "%63[^=]=%63s", mib_name, newp_chr) == 2) {
+			newplen = strlen(newp_chr);
+			if (!newplen) continue;
+
+			if (newp_chr[0] > '9') {
+				if (error = uinet_sysctlbyname(uinet_instance_default(), mib_name, NULL, NULL, newp_chr, newplen, &rval, 0)) {
+					printf("uinet_sysctlbyname failure: %d\n", error);
+				} else {
+					printf("sysctl okay %s=%s\n", mib_name, newp_chr);
+				}
 			} else {
-				printf("sysctl okay %s=%d (%d)\n", mib_name, newp, oldp);
+				oldplen = sizeof(oldp);
+				newp = atol(newp_chr);
+
+				if (error = uinet_sysctlbyname(uinet_instance_default(), mib_name, (char *)&oldp, &oldplen, (char *)&newp, sizeof(newp), &rval, 0)) {
+					printf("uinet_sysctlbyname failure: %d\n", error);
+				} else {
+					printf("sysctl okay %s=%d (%d)\n", mib_name, newp, oldp);
+				}
 			}
 		}
 	}

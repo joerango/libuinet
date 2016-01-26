@@ -286,7 +286,8 @@ NETINET_SRCS+=		\
 	tcp_usrreq.c	\
 	udp_usrreq.c	\
 	cc.c		\
-	cc_newreno.c
+	cc_newreno.c	\
+	cc_htcp.c
 
 
 NETINET6_SRCS+=
