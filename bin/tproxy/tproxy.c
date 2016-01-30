@@ -599,6 +599,42 @@ err:
 
 
 static void
+print_tcp_state(struct uinet_socket *so, const char *label)
+{
+	struct uinet_tcp_info info;
+	char cc_algo[64];
+	unsigned int optlen;
+	int error;
+
+	memset(&info, 0, sizeof(info));
+	optlen = sizeof(info);
+
+	if ((error = uinet_sogetsockopt(so, UINET_IPPROTO_TCP, UINET_TCP_INFO, &info, &optlen))) {
+		printf("%s: could not get TCP state (%d)\n", label, error);
+		return;
+	}
+	
+	memset(cc_algo, 0, sizeof(cc_algo));
+	optlen = sizeof(cc_algo);
+
+	if ((error = uinet_sogetsockopt(so, UINET_IPPROTO_TCP, UINET_TCP_CONGESTION, cc_algo, &optlen))) {
+		printf("%s: could not get TCP congestion algo (%d)\n", label, error);
+		return;
+	}
+
+	printf("========================================================================================\n");
+	printf("%s: fsm_state=%u rtt_us=%u rttvar_us=%u\n", label, info.tcpi_state, info.tcpi_rtt, info.tcpi_rttvar);
+	printf("%s: snd mss=%u wscale=%u wnd=%u seq_nxt=%u retrans=%u zerowin=%u\n", label,
+	       info.tcpi_snd_mss, info.tcpi_snd_wscale, info.tcpi_snd_wnd, info.tcpi_snd_nxt, info.tcpi_snd_rexmitpack, info.tcpi_snd_zerowin);
+	printf("%s: snd ssthresh=%u cwnd=%u\n", label, info.tcpi_snd_ssthresh, info.tcpi_snd_cwnd);
+	printf("%s: rcv mss=%u wscale=%u wnd=%u seq_nxt=%u ooo=%u\n", label,
+	       info.tcpi_rcv_mss, info.tcpi_rcv_wscale, info.tcpi_rcv_space, info.tcpi_rcv_nxt, info.tcpi_rcv_ooopack);
+	printf("%s: cc=%s\n", label, cc_algo);
+	printf("========================================================================================\n");
+}
+
+
+static void
 pipe_cb(struct ev_loop *loop, ev_uinet *w, int revents)
 {
 #define BUFFER_SIZE (64*1024)
@@ -610,7 +646,9 @@ pipe_cb(struct ev_loop *loop, ev_uinet *w, int revents)
 	int max_write;
 	int read_size;
 	int error;
-
+	
+	static int ix = 0;
+	
 	max_read = uinet_soreadable(pipe->from->so, 0);
 	if (max_read <= 0) {
 		/* the watcher should never be invoked if there is no error and there no bytes to be read */
@@ -649,6 +687,12 @@ pipe_cb(struct ev_loop *loop, ev_uinet *w, int revents)
 			if (0 != error) {
 				printf("write error (%d), closing\n", error);
 				goto err;
+			}
+			
+			if (ix++ % 32 == 0) {
+				printf("%s: read_size=%d\n", pipe->name, read_size);
+				print_tcp_state(pipe->from->so, "FROM");
+				print_tcp_state(pipe->to->so,	"TOXX");
 			}
 
 			if (max_write < max_read) {
