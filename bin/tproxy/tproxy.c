@@ -599,6 +599,42 @@ err:
 
 
 static void
+print_tcp_state(struct uinet_socket *so, const char *label)
+{
+	struct uinet_tcp_info info;
+	char cc_algo[64];
+	unsigned int optlen;
+	int error;
+
+	memset(&info, 0, sizeof(info));
+	optlen = sizeof(info);
+
+	if ((error = uinet_sogetsockopt(so, UINET_IPPROTO_TCP, UINET_TCP_INFO, &info, &optlen))) {
+		printf("%s: could not get TCP state (%d)\n", label, error);
+		return;
+	}
+	
+	memset(cc_algo, 0, sizeof(cc_algo));
+	optlen = sizeof(cc_algo);
+
+	if ((error = uinet_sogetsockopt(so, UINET_IPPROTO_TCP, UINET_TCP_CONGESTION, cc_algo, &optlen))) {
+		printf("%s: could not get TCP congestion algo (%d)\n", label, error);
+		return;
+	}
+
+	printf("========================================================================================\n");
+	printf("%s: fsm_state=%u rtt_us=%u rttvar_us=%u\n", label, info.tcpi_state, info.tcpi_rtt, info.tcpi_rttvar);
+	printf("%s: snd mss=%u wscale=%u wnd=%u seq_nxt=%u retrans=%u zerowin=%u\n", label,
+	       info.tcpi_snd_mss, info.tcpi_snd_wscale, info.tcpi_snd_wnd, info.tcpi_snd_nxt, info.tcpi_snd_rexmitpack, info.tcpi_snd_zerowin);
+	printf("%s: snd ssthresh=%u cwnd=%u\n", label, info.tcpi_snd_ssthresh, info.tcpi_snd_cwnd);
+	printf("%s: rcv mss=%u wscale=%u wnd=%u seq_nxt=%u ooo=%u\n", label,
+	       info.tcpi_rcv_mss, info.tcpi_rcv_wscale, info.tcpi_rcv_space, info.tcpi_rcv_nxt, info.tcpi_rcv_ooopack);
+	printf("%s: cc=%s\n", label, cc_algo);
+	printf("========================================================================================\n");
+}
+
+
+static void
 pipe_cb(struct ev_loop *loop, ev_uinet *w, int revents)
 {
 #define BUFFER_SIZE (64*1024)
@@ -610,7 +646,9 @@ pipe_cb(struct ev_loop *loop, ev_uinet *w, int revents)
 	int max_write;
 	int read_size;
 	int error;
-
+	
+	static int ix = 0;
+	
 	max_read = uinet_soreadable(pipe->from->so, 0);
 	if (max_read <= 0) {
 		/* the watcher should never be invoked if there is no error and there no bytes to be read */
@@ -649,6 +687,12 @@ pipe_cb(struct ev_loop *loop, ev_uinet *w, int revents)
 			if (0 != error) {
 				printf("write error (%d), closing\n", error);
 				goto err;
+			}
+			
+			if (ix++ % 32 == 0) {
+				printf("%s: read_size=%d\n", pipe->name, read_size);
+				print_tcp_state(pipe->from->so, "FROM");
+				print_tcp_state(pipe->to->so,	"TOXX");
 			}
 
 			if (max_write < max_read) {
@@ -864,6 +908,56 @@ fail:
 	return (NULL);
 }
 
+static void
+sysctl_opts_configure(const char *config_file)
+{
+	FILE *file = NULL;
+	char *line = NULL;
+	ssize_t read;
+
+	char mib_name[64], newp_chr[64]; // @TODO: correct buffer sizing
+	size_t lnlen = 0, oldplen, newplen, rval;
+	int64_t oldp, newp;
+	int error;
+
+	printf("\nreading sysctl config: %s\n", config_file);
+
+	file = fopen(config_file, "r");
+	if (!file) {
+		perror("WARNING: failed to open configuration file");
+		goto fail;
+	}
+
+	while ((read = getline(&line, &lnlen, file)) != -1) {
+		if (sscanf(line, "%63[^=]=%63s", mib_name, newp_chr) == 2) {
+			newplen = strlen(newp_chr);
+			if (!newplen) continue;
+
+			if (newp_chr[0] > '9') {
+				if (error = uinet_sysctlbyname(uinet_instance_default(), mib_name, NULL, NULL, newp_chr, newplen, &rval, 0)) {
+					printf("uinet_sysctlbyname failure: %d\n", error);
+				} else {
+					printf("sysctl okay %s=%s\n", mib_name, newp_chr);
+				}
+			} else {
+				oldplen = sizeof(oldp);
+				newp = atol(newp_chr);
+
+				if (error = uinet_sysctlbyname(uinet_instance_default(), mib_name, (char *)&oldp, &oldplen, (char *)&newp, sizeof(newp), &rval, 0)) {
+					printf("uinet_sysctlbyname failure: %d\n", error);
+				} else {
+					printf("sysctl okay %s=%d (%d)\n", mib_name, newp, oldp);
+				}
+			}
+		}
+	}
+
+	printf("sysctl config complete...\n\n");
+
+fail:
+	if (file) fclose(file);
+	if (line) free(line);
+}
 
 static void
 usage(const char *progname)
@@ -874,6 +968,7 @@ usage(const char *progname)
 	printf("    -i ifname            specify network interface\n");
 	printf("    -l inaddr            listen address\n");
 	printf("    -p port              listen port [0, 65535]\n");
+	printf("    -c config            configuration file\n");
 	printf("    -v                   be verbose\n");
 }
 
@@ -887,12 +982,13 @@ int main (int argc, char **argv)
 	int num_ifs = 0;
 	char *ifnames[MAX_IFS];
 	char *listen_addr = NULL;
+	char *config_file = NULL;
 	int listen_port = -1;
 	int verbose = 0;
 	int i;
 	int error;
 
-	while ((ch = getopt(argc, argv, "hi:l:p:v")) != -1) {
+	while ((ch = getopt(argc, argv, "hi:l:p:c:v")) != -1) {
 		switch (ch) {
 		case 'h':
 			usage(progname);
@@ -908,6 +1004,9 @@ int main (int argc, char **argv)
 			break;
 		case 'p':
 			listen_port = strtoul(optarg, NULL, 10);
+			break;
+		case 'c':
+			config_file = optarg;
 			break;
 		case 'v':
 			verbose++;
@@ -936,12 +1035,16 @@ int main (int argc, char **argv)
 		printf("Specify a listen port [0, 65535]\n");
 		return (1);
 	}
-	
+
 	uinet_init(1, 128*1024, NULL);
 	uinet_install_sighandlers();
 
+	if (config_file) {
+		sysctl_opts_configure(config_file);
+	}
+
 	for (i = 0; i < num_ifs; i++) {
-		error = uinet_ifcreate(uinet_instance_default(), UINET_IFTYPE_NETMAP, ifnames[i], ifnames[i], i + 1, 0, NULL);
+		error = uinet_ifcreate(uinet_instance_default(), UINET_IFTYPE_PCAP, ifnames[i], ifnames[i], i + 1, 0, NULL);
 		if (0 != error) {
 			printf("Failed to create interface %s (%d)\n", ifnames[i], error);
 		} else {
